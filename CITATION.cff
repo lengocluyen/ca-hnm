@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the accompanying CA-HNM paper."
+title: "CA-HNM: Constraint-Aware Hard Negative Mining for Dense Retrieval"
+authors:
+  - family-names: "TODO"
+    given-names: "TODO"
+year: 2026
+repository-code: "https://github.com/TODO/cahnm"
+license: "NOASSERTION"
+

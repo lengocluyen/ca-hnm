@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cahnm"
+version = "0.1.0"
+description = "Constraint-aware hard negative mining framework for neural retrieval experiments."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "certifi>=2024.2.2",
+  "requests>=2.31",
+  "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dense = [
+  "numpy>=1.24",
+  "scikit-learn>=1.4",
+  "sentence-transformers>=3.0",
+  "torch>=2.1",
+]
+llm = [
+  "openai>=1.0",
+  "httpx>=0.24,<0.28",
+]
+dev = [
+  "pytest>=8.0",
+]
+
+[project.scripts]
+cahnm = "cahnm.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
