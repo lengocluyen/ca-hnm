@@ -1,82 +1,65 @@
 # CA-HNM: Constraint-Aware Hard Negative Mining
 
-This repository contains the implementation for **Constraint-Aware Hard Negative Mining (CA-HNM)**, a framework for mining hard negatives for dense retrieval using structured domain constraints.
+This public artifact implements **CA-HNM**, an offline negative-selection method
+for dense retrieval with structured domain models. It is aligned with the current
+conference manuscript and its three empirical questions:
 
-CA-HNM selects negatives that are:
+1. CA-HNM-Pure versus a retrieval-rank-matched control;
+2. CA-HNM-Mixed versus matched-mixed negative pools; and
+3. sensitivity to label-only, shuffled-graph, and no-structure variants.
 
-1. close to the query under lexical or dense retrieval,
-2. not labeled as relevant,
-3. invalid under ontology-derived constraints.
+The structured model is used only while constructing training negatives. The
+retriever remains a standard dual encoder during training and inference.
 
-The ontology is used only during offline negative mining. It is not used as retriever input and is not required at inference time.
+## Paper terminology and implementation names
 
-## Repository Layout
+| Paper name | Command-line strategy |
+| --- | --- |
+| DPR-Random | `DPR-Random` |
+| DenseNeg | `DenseNeg` |
+| Rank-matched | `CA-HNM-rank-matched` |
+| CA-HNM-Pure | `CA-HNM-full` |
+| CA-HNM-Mixed | `CA-HNM-mixed` |
+| Matched-mixed | `CA-HNM-matched-mixed` |
+| Label-only | `CA-HNM-label-only` |
+| Shuffled graph | `CA-HNM-shuffled-graph` |
+| No structure | `CA-HNM-no-ontology` |
+
+## Repository layout
 
 ```text
-src/cahnm/                 Core package
-scripts/                   CLI wrappers and experiment utilities
-examples/sample_benchmark/ Small runnable benchmark
-configs/                   Example configuration
-docs/                      Additional implementation notes
-tests/                     Unit tests
-DATASETS.md                Dataset download and preprocessing guide
-REPRODUCIBILITY.md         Paper experiment commands
+src/cahnm/                 Mining, retrieval, evaluation, and training code
+scripts/                   Dataset, experiment, aggregation, and figure scripts
+scripts/server/            Optional Linux/Slurm launchers
+examples/sample_benchmark/ Small synthetic smoke-test collection
+results/factorial/         Canonical RQ1 aggregate summaries
+results/expanded/          Canonical RQ2/RQ3 aggregate summaries
+tests/                     Deterministic unit and integration tests
+DATASETS.md                Dataset preparation and split construction
+REPRODUCIBILITY.md         Commands matching the paper protocol
 ```
 
-Generated files are intentionally excluded from the public artifact:
-
-- `data/`
-- `runs/`
-- trained model checkpoints
-- LLM cache files
-- downloaded third-party datasets
+Raw datasets, model checkpoints, per-query training outputs, and downloaded model
+weights are intentionally excluded. The compact CSV files under `results/` are
+included so that the manuscript tables and Figure 3 can be checked without the
+large checkpoints.
 
 ## Installation
 
-Create a Python environment with Python 3.10 or newer:
+Python 3.10 or newer is required.
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
+python -m pip install -e ".[dense,plots,dev]"
 ```
 
-On Windows PowerShell:
+On Windows PowerShell, activate with `.\.venv\Scripts\Activate.ps1`.
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-```
+## Quick smoke test
 
-Install the package:
-
-```bash
-python -m pip install -e .
-```
-
-For dense retrieval and training with sentence-transformers:
-
-```bash
-python -m pip install -e ".[dense]"
-```
-
-For LLM-assisted validation through an OpenAI-compatible API:
-
-```bash
-python -m pip install -e ".[llm]"
-```
-
-For tests:
-
-```bash
-python -m pip install -e ".[dev]"
-pytest
-```
-
-## Quick Smoke Test
-
-The repository includes a tiny sample benchmark.
+The smoke test uses a deterministic hash retriever and does not require a GPU:
 
 ```bash
 python scripts/compare_baselines.py \
@@ -84,72 +67,45 @@ python scripts/compare_baselines.py \
   --queries examples/sample_benchmark/queries.jsonl \
   --qrels examples/sample_benchmark/qrels.tsv \
   --ontology examples/sample_benchmark/ontology.json \
-  --strategies DPR-Random ANCE CA-HNM-full CA-HNM-mixed \
+  --strategies DPR-Random DenseNeg CA-HNM-rank-matched CA-HNM-full \
   --dense-backend hash \
+  --top-k 5 \
+  --negatives-per-query 2 \
   --out runs/sample_comparison
+
+python -m pytest -q
 ```
 
-Expected outputs:
+## Reproducing the study
 
-```text
-runs/sample_comparison/*.negatives.jsonl
-runs/sample_comparison/*.triplets.jsonl
-runs/sample_comparison/retrieval_metrics.json
-runs/sample_comparison/negative_quality.csv
-```
+1. Follow [DATASETS.md](DATASETS.md) to create the two processed collections and
+   target-disjoint train/development/test splits.
+2. Follow [REPRODUCIBILITY.md](REPRODUCIBILITY.md) to run the factorial and
+   expanded experiment matrices.
+3. Aggregate the completed runs and regenerate the paper tables and forest plot.
 
-## Reproducing the Paper Experiments
+The reported paper results use the development partitions. The held-out test
+qrels were not used for model or configuration selection.
 
-See:
+## Included result summaries
 
-- [DATASETS.md](DATASETS.md) for obtaining and preprocessing MoocCubeX and Course-Skill Atlas.
-- [REPRODUCIBILITY.md](REPRODUCIBILITY.md) for the main training, validation, statistics, and figure commands.
+- `results/factorial/`: two datasets, two encoders, two losses, four strategies,
+  and ten training seeds.
+- `results/expanded/`: BGE with cached MNRL for the mixed-pool and structural
+  controls, also with ten seeds.
+- `results/effect_forest_source.csv`: the eight paired NDCG@10 effects and
+  hierarchical 95% bootstrap intervals plotted in Figure 3.
 
-The main paper configuration uses:
+These files contain aggregate and seed-level summaries, not model checkpoints.
 
-- retriever: `BAAI/bge-base-en-v1.5`
-- top-k candidate pool: `100`
-- negatives per query: `4`
-- loss: Multiple Negatives Ranking Loss (`mnrl`)
-- sequence length: `128`
-- training epochs: `1`
-- mining judge: deterministic heuristic classifier
+## Scope
 
-## Data Format
-
-`corpus.jsonl`
-
-```json
-{"_id": "d1", "title": "Introduction to SQL Joins", "text": "Beginner SQL joins...", "metadata": {"level": "beginner"}}
-```
-
-`queries.jsonl`
-
-```json
-{"_id": "q1", "text": "beginner SQL joins", "target_concept": "sql_joins", "metadata": {}}
-```
-
-`qrels.tsv`
-
-```text
-query_id	doc_id	relevance
-q1	d1	1
-```
-
-`ontology.json`
-
-```json
-{
-  "nodes": [
-    {"id": "sql_joins", "label": "SQL joins", "aliases": ["INNER JOIN"], "level": "beginner"}
-  ],
-  "relations": [
-    {"source": "sql_joins", "target": "sql_querying", "type": "is_a"}
-  ]
-}
-```
+The public artifact contains the methods and experiments reported in the current
+paper. Historical one-epoch runs, LLM-assisted validation, human-annotation
+utilities, biomedical/NFCorpus experiments, proxy related-work baselines, and
+figures from the rejected submission have been removed from this release.
 
 ## Citation
 
-If you use this code, please cite the accompanying paper. A citation template is provided in [CITATION.cff](CITATION.cff).
-
+Please use [CITATION.cff](CITATION.cff). Add the final proceedings DOI and
+repository URL after they are assigned.

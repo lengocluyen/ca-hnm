@@ -1,176 +1,163 @@
-# Reproducibility Guide
+# Reproducibility guide
 
-This file gives the main commands used for the CA-HNM paper experiments. The commands assume the datasets have already been prepared as described in [DATASETS.md](DATASETS.md).
+This guide matches the protocol reported in the current CA-HNM paper.
 
-## Main Paper Runs
+## Canonical configuration
 
-### MoocCubeX
+| Item | Value |
+| --- | --- |
+| Collections | MOOCCubeX, Course-Skill Atlas |
+| Encoders | `BAAI/bge-base-en-v1.5`, `intfloat/e5-base-v2` |
+| Losses | triplet, cached MNRL |
+| Training seeds | 11, 22, 33, 44, 55, 66, 77, 88, 99, 111 |
+| Mining seed | 13 |
+| Candidate depth | 100 per lexical/dense retriever |
+| Explicit negatives | 4 per query |
+| Epochs | 3 |
+| Batch size | 32 |
+| Cached mini-batch | 4 |
+| Learning rate | 2e-5 |
+| Warmup | 10% |
+| Maximum sequence length | 128 |
+| Evaluation partition | development |
+
+Prepare both datasets first by following [DATASETS.md](DATASETS.md).
+
+## 1. Factorial RQ1 experiment
+
+This matrix evaluates DPR-Random, DenseNeg, rank-matched, and CA-HNM-Pure for
+two datasets, two encoders, two losses, and ten seeds:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-python scripts/run_full_suite.py \
-  --datasets mooccubex \
-  --judges heuristic \
-  --gpu 0 \
-  --dense-model BAAI/bge-base-en-v1.5 \
-  --train-model BAAI/bge-base-en-v1.5 \
-  --dense-batch-size 4 \
-  --train-batch-size 4 \
+python scripts/run_experiment_matrix.py \
+  --stage all \
+  --datasets mooccubex course_skill_atlas \
+  --models bge-base e5-base \
+  --losses triplet cached-mnrl \
+  --seeds 11 22 33 44 55 66 77 88 99 111 \
+  --profile core \
+  --eval-split dev \
+  --device cuda \
+  --dense-batch-size 8 \
+  --train-batch-size 32 \
+  --cached-mini-batch-size 4 \
   --max-seq-length 128 \
+  --epochs 3 \
+  --learning-rate 2e-5 \
+  --warmup-ratio 0.1 \
   --top-k 100 \
   --negatives-per-query 4 \
-  --epochs 1 \
-  --loss mnrl \
-  --candidate-fusion rrf \
-  --selection-policy retrieval_aware \
-  --eval-top-k 100 \
-  --llm-model gpt-oss-20b \
-  --llm-base-url http://localhost:1234/v1 \
-  --llm-validation-sample-size 1000 \
-  --allow-validation-failure \
-  --out-root runs/e1_mooccubex_v2_heuristic_bge_base_top100_neg4_mnrl
+  --mining-seed 13 \
+  --out-root runs/paper_experiments \
+  --resume
 ```
 
-### Course-Skill Atlas
+Negative pools are mined once per dataset/encoder and reused unchanged across
+training seeds.
+
+## 2. Expanded RQ2/RQ3 experiment
+
+The mixed-pool and structural analyses use BGE with cached MNRL:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-python scripts/run_full_suite.py \
-  --datasets course_skill_atlas \
-  --judges heuristic \
-  --gpu 0 \
-  --dense-model BAAI/bge-base-en-v1.5 \
-  --train-model BAAI/bge-base-en-v1.5 \
-  --dense-batch-size 4 \
-  --train-batch-size 4 \
+python scripts/run_experiment_matrix.py \
+  --stage all \
+  --datasets mooccubex course_skill_atlas \
+  --models bge-base \
+  --losses cached-mnrl \
+  --seeds 11 22 33 44 55 66 77 88 99 111 \
+  --profile ablation \
+  --eval-split dev \
+  --device cuda \
+  --dense-batch-size 8 \
+  --train-batch-size 32 \
+  --cached-mini-batch-size 4 \
   --max-seq-length 128 \
+  --epochs 3 \
+  --learning-rate 2e-5 \
+  --warmup-ratio 0.1 \
   --top-k 100 \
   --negatives-per-query 4 \
-  --epochs 1 \
-  --loss mnrl \
-  --candidate-fusion rrf \
-  --selection-policy retrieval_aware \
-  --eval-top-k 100 \
-  --llm-model gpt-oss-20b \
-  --llm-base-url http://localhost:1234/v1 \
-  --llm-validation-sample-size 1000 \
-  --allow-validation-failure \
-  --out-root runs/e1_course_skill_atlas_v2_heuristic_bge_base_top100_neg4_mnrl
+  --mining-seed 13 \
+  --out-root runs/paper_experiments_expanded \
+  --resume
 ```
 
-## Key Output Files
+## 3. Aggregate paired results
 
-For each dataset run, the main output directory contains:
+```bash
+python scripts/aggregate_experiment_runs.py \
+  --runs-root runs/paper_experiments/training \
+  --baseline CA-HNM-rank-matched \
+  --bootstrap-samples 5000 \
+  --seed 20260825 \
+  --out-dir runs/paper_experiments/analysis
+
+python scripts/aggregate_experiment_runs.py \
+  --runs-root runs/paper_experiments_expanded/training \
+  --baseline CA-HNM-rank-matched \
+  --bootstrap-samples 5000 \
+  --seed 20260825 \
+  --out-dir runs/paper_experiments_expanded/analysis
+```
+
+The hierarchical bootstrap resamples training seeds and, within sampled seeds,
+development queries. The paper interprets the paired mean differences and 95%
+bootstrap intervals.
+
+## 4. Canonical source rule for repeated cells
+
+The expanded execution is canonical for every BGE/cached-MNRL cell because it
+contains the mixed and structural controls. The factorial execution supplies the
+other six encoder-loss configurations. `make_results_tables.py` and
+`make_results_figures.py` implement this rule explicitly, preventing the same
+method/configuration from appearing with values from different executions.
+
+## 5. Regenerate paper outputs from included summaries
+
+The repository includes compact copies of the aggregate CSVs under `results/`.
+Regenerate the LaTeX tables and Figure 3 without model checkpoints:
+
+```bash
+python scripts/make_results_tables.py
+python scripts/make_results_figures.py
+```
+
+Outputs are written to:
 
 ```text
-retrieval_metrics.json
-trained_retrieval_metrics.json
-negative_quality.csv
-training_summary.csv
-training_summary.json
-*.negatives.jsonl
-*.triplets.jsonl
-*.gpt-oss-20b_validation_summary.json
-*.gpt-oss-20b_validation_decisions.jsonl
-models/
-analysis/
+artifacts/tables/core_results.tex
+artifacts/tables/hybrid_results.tex
+artifacts/tables/ablation_results.tex
+artifacts/figures/effect_forest.pdf
+artifacts/figures/effect_forest.png
 ```
 
-## Zero-Shot Baselines
+The figure script also regenerates `results/effect_forest_source.csv` and checks
+the paper's numerical statement: six of eight mean differences are positive and
+four 95% intervals are entirely above zero.
+
+## 6. Linux/Slurm helpers
+
+For a direct Linux run:
 
 ```bash
-python scripts/evaluate_zero_shot_baselines.py \
-  --corpus data/processed/mooccubex_full/corpus.jsonl \
-  --queries data/processed/mooccubex_full/queries.jsonl \
-  --qrels data/processed/mooccubex_full/qrels.tsv \
-  --ontology data/processed/mooccubex_ontology_full.json \
-  --dense-model BAAI/bge-base-en-v1.5 \
-  --dense-device cuda \
-  --out runs/old_main_stats/mooccubex_zero_shot_baselines.json
+export RUN_ROOT=runs/paper_experiments
+bash scripts/server/run_pipeline.sh all-dev
 ```
+
+For Slurm, adjust the `#SBATCH` resource lines and run:
 
 ```bash
-python scripts/evaluate_zero_shot_baselines.py \
-  --corpus data/processed/course_skill_atlas/corpus.jsonl \
-  --queries data/processed/course_skill_atlas/queries.jsonl \
-  --qrels data/processed/course_skill_atlas/qrels.tsv \
-  --ontology data/processed/course_skill_atlas_ontology.json \
-  --dense-model BAAI/bge-base-en-v1.5 \
-  --dense-device cuda \
-  --out runs/old_main_stats/course_skill_atlas_zero_shot_baselines.json
+bash scripts/server/submit_slurm.sh
 ```
 
-## Statistical Tests
+The launchers default to the exact datasets, encoders, losses, and seeds listed
+above. Check `runs/.../matrix_manifest.json`, `commands.jsonl`, and each
+`experiment_run.json` before interpreting results.
 
-Run paired tests on trained model outputs:
+## 7. Hardware note
 
-```bash
-python scripts/statistical_tests.py \
-  --run runs/e1_mooccubex_v2_heuristic_bge_base_top100_neg4_mnrl/mooccubex_heuristic_baai_bge_base_en_v1_5 \
-  --baseline DPR-Random \
-  --methods CA-HNM-mixed CA-HNM-v2-mixed \
-  --out runs/old_main_stats/mooccubex
-```
-
-```bash
-python scripts/statistical_tests.py \
-  --run runs/e1_course_skill_atlas_v2_heuristic_bge_base_top100_neg4_mnrl/course_skill_atlas_heuristic_baai_bge_base_en_v1_5 \
-  --baseline DPR-Random \
-  --methods CA-HNM-mixed CA-HNM-v2-mixed \
-  --out runs/old_main_stats/course_skill_atlas
-```
-
-## LLM-Assisted Validation From Annotation Sheets
-
-If using an OpenAI-compatible local or remote API:
-
-```bash
-python scripts/llm_validate_sheet.py \
-  --input runs/human_validation_old/mooccubex_validation_sheet.csv \
-  --output runs/human_validation_old/gpt_family/mooccubex_judgments.jsonl \
-  --llm-base-url http://localhost:1234/v1 \
-  --llm-model gpt-oss-20b
-```
-
-```bash
-python scripts/llm_validate_sheet.py \
-  --input runs/human_validation_old/course_skill_atlas_validation_sheet.csv \
-  --output runs/human_validation_old/gpt_family/course_skill_atlas_judgments.jsonl \
-  --llm-base-url http://localhost:1234/v1 \
-  --llm-model gpt-oss-20b
-```
-
-For commercial LLMs that are evaluated manually or through a separate UI, keep the same JSON schema:
-
-```json
-{"item_id": "...", "label": "HardNeg", "violation_types": ["target_concept_mismatch"], "evidence": "...", "confidence": 0.82}
-```
-
-Allowed labels:
-
-```text
-HardNeg, EasyNeg, Positive, Ambiguous
-```
-
-## Figure Generation
-
-```bash
-python scripts/make_paper_figures.py \
-  --mooccubex-run runs/e1_mooccubex_v2_heuristic_bge_base_top100_neg4_mnrl/mooccubex_heuristic_baai_bge_base_en_v1_5 \
-  --csa-run runs/e1_course_skill_atlas_v2_heuristic_bge_base_top100_neg4_mnrl/course_skill_atlas_heuristic_baai_bge_base_en_v1_5 \
-  --out runs/paper_figures_base_grouped
-```
-
-```bash
-python scripts/make_review_figures.py \
-  --stats-root runs/old_main_stats \
-  --out runs/paper_figures_review_oldcfg
-```
-
-## Notes
-
-- Use `--resume` when restarting interrupted experiments.
-- Use `--allow-validation-failure` when LLM validation is optional.
-- The deterministic heuristic judge is the scalable mining method used in the main experiments.
-- LLM-assisted validation is a complementary diagnostic and should not be interpreted as ground-truth annotation.
-
+Install a PyTorch build compatible with the GPU's compute capability. Tesla V100
+(`sm_70`) systems require a wheel that still contains Volta kernels and a cuDNN
+version compatible with `sm_70`; newer wheels may omit this support.

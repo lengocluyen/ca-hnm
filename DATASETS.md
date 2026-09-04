@@ -1,20 +1,14 @@
-# Dataset Acquisition and Preprocessing
+# Dataset acquisition and preprocessing
 
-This repository does not include third-party datasets. Downloaded datasets, processed benchmarks, trained models, and run outputs should remain outside version control.
+The paper evaluates MOOCCubeX and Course-Skill Atlas. Third-party dataset files
+are not redistributed in this repository. Check the original licenses before
+downloading or sharing them.
 
-Recommended local layout:
+The commands below create the paths expected by `scripts/run_experiment_matrix.py`.
 
-```text
-data/raw/                  Downloaded source datasets
-data/processed/            Processed retrieval benchmarks and ontologies
-runs/                      Experiment outputs
-```
+## 1. MOOCCubeX
 
-## 1. MoocCubeX
-
-MoocCubeX files are downloaded from the public AMiner-hosted release used by the project downloader. The downloader writes a manifest and skips optional files that are unavailable from the upstream host unless `--strict-downloads` is used.
-
-Download the core files used by CA-HNM:
+Download the core files used by the retrieval benchmark:
 
 ```bash
 python scripts/download_datasets.py mooccubex \
@@ -23,7 +17,7 @@ python scripts/download_datasets.py mooccubex \
   --mooccubex-preset core
 ```
 
-Build the ontology:
+Build the concept/prerequisite structure:
 
 ```bash
 python scripts/build_ontology.py mooccubex \
@@ -31,41 +25,34 @@ python scripts/build_ontology.py mooccubex \
   --out data/processed/mooccubex_ontology_full.json
 ```
 
-Prepare the retrieval benchmark:
+Prepare concepts as queries, courses as documents, and source concept-course
+links as binary qrels:
 
 ```bash
 python scripts/prepare_mooccubex.py \
   --input data/raw/mooccubex_full \
   --ontology data/processed/mooccubex_ontology_full.json \
-  --out data/processed/mooccubex_full \
+  --out data/paper/mooccubex \
   --max-queries 5000
 ```
 
-Expected processed files:
-
-```text
-data/processed/mooccubex_full/corpus.jsonl
-data/processed/mooccubex_full/queries.jsonl
-data/processed/mooccubex_full/qrels.tsv
-data/processed/mooccubex_ontology_full.json
-```
-
-For a larger server-side download, use:
+Create the target-disjoint 70/10/20 split used in the paper:
 
 ```bash
-python scripts/download_datasets.py mooccubex \
-  --out data/raw/mooccubex_full \
-  --no-metadata-only \
-  --mooccubex-preset all
+python scripts/split_benchmark.py \
+  --queries data/paper/mooccubex/queries.jsonl \
+  --qrels data/paper/mooccubex/qrels.tsv \
+  --out-dir data/splits/paper/mooccubex \
+  --seed 20260825
 ```
 
-The full preset is much larger and is not required for the main CA-HNM retrieval benchmark.
+The paper instance contains 3,781 documents and 3,500/500/1,000
+train/development/test queries.
 
 ## 2. Course-Skill Atlas
 
-Course-Skill Atlas is downloaded through the Figshare article metadata endpoint used by the project downloader.
-
-Download the dataset:
+Download the source files through the Figshare metadata endpoint used by the
+project downloader:
 
 ```bash
 python scripts/download_datasets.py course-skill-atlas \
@@ -75,7 +62,7 @@ python scripts/download_datasets.py course-skill-atlas \
   --retries 10
 ```
 
-Build the ontology:
+Build the hierarchy and related-concept structure:
 
 ```bash
 python scripts/build_ontology.py course-skill-atlas \
@@ -83,52 +70,50 @@ python scripts/build_ontology.py course-skill-atlas \
   --out data/processed/course_skill_atlas_ontology.json
 ```
 
-Prepare the retrieval benchmark:
+Prepare institution-field-year profiles as documents and Detailed Work
+Activities (DWAs) as queries:
 
 ```bash
 python scripts/prepare_course_skill_atlas.py \
   --input data/raw/course_skill_atlas \
   --ontology data/processed/course_skill_atlas_ontology.json \
-  --out data/processed/course_skill_atlas \
+  --out data/paper/course_skill_atlas \
   --max-queries 1000 \
   --max-positives-per-query 100
 ```
 
-Expected processed files:
+A DWA query is linked to fields whose source top-10 DWA list contains that
+activity. Retained qrels are binary. When more than 100 profiles are associated
+with a query, the preparation code retains the first 100 after its deterministic
+source ordering.
 
-```text
-data/processed/course_skill_atlas/corpus.jsonl
-data/processed/course_skill_atlas/queries.jsonl
-data/processed/course_skill_atlas/qrels.tsv
-data/processed/course_skill_atlas_ontology.json
-```
-
-## 3. Verify Processed Files
-
-After preprocessing, check that the expected benchmark files exist:
+Create the paper split:
 
 ```bash
-python - <<'PY'
-from pathlib import Path
-
-paths = [
-    "data/processed/mooccubex_full/corpus.jsonl",
-    "data/processed/mooccubex_full/queries.jsonl",
-    "data/processed/mooccubex_full/qrels.tsv",
-    "data/processed/mooccubex_ontology_full.json",
-    "data/processed/course_skill_atlas/corpus.jsonl",
-    "data/processed/course_skill_atlas/queries.jsonl",
-    "data/processed/course_skill_atlas/qrels.tsv",
-    "data/processed/course_skill_atlas_ontology.json",
-]
-
-for path in paths:
-    p = Path(path)
-    print(f"{path}: {'OK' if p.exists() else 'MISSING'}")
-PY
+python scripts/split_benchmark.py \
+  --queries data/paper/course_skill_atlas/queries.jsonl \
+  --qrels data/paper/course_skill_atlas/qrels.tsv \
+  --out-dir data/splits/paper/course_skill_atlas \
+  --seed 20260825
 ```
 
-## 4. Notes on Dataset Licenses
+The paper instance contains 281,153 documents and 227/32/65
+train/development/test queries.
 
-Before redistributing any dataset files, check the original dataset licenses and terms. This repository is intended to redistribute code and small synthetic examples only, not third-party dataset contents.
+## 3. Split verification
 
+Each split directory contains:
+
+```text
+train.queries.jsonl   train.qrels.tsv
+dev.queries.jsonl     dev.qrels.tsv
+test.queries.jsonl    test.qrels.tsv
+split_manifest.json
+```
+
+`split_manifest.json` records input/output hashes, counts, the split seed, and an
+overlap audit. `run_experiment_matrix.py` refuses a split whose overlap audit is
+non-zero.
+
+The paper reports development performance only. Do not inspect the test metrics
+until a configuration has been frozen.

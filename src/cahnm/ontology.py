@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 from collections import defaultdict
 from pathlib import Path
 
@@ -67,6 +68,50 @@ class Ontology:
             if label and label in lowered:
                 return self.nodes[node_id]
         return None
+
+    def without_relations(self) -> "Ontology":
+        """Return a label-only placebo ontology with the same nodes and no graph edges."""
+        return Ontology(list(self.nodes.values()), [])
+
+    def shuffled_relations(self, random_seed: int = 13) -> "Ontology":
+        """Return a deterministic graph placebo preserving per-type source and target marginals."""
+        rng = random.Random(random_seed)
+        by_type: dict[str, list[OntologyRelation]] = defaultdict(list)
+        for relation in self.relations:
+            by_type[relation.type].append(relation)
+
+        shuffled: list[OntologyRelation] = []
+        for relation_type in sorted(by_type):
+            relations = sorted(
+                by_type[relation_type],
+                key=lambda item: (item.source, item.target, item.weight),
+            )
+            targets = [relation.target for relation in relations]
+            rng.shuffle(targets)
+            if len(targets) > 1:
+                candidate_offsets = list(range(len(targets)))
+                rng.shuffle(candidate_offsets)
+                candidate_offsets = candidate_offsets[: min(64, len(candidate_offsets))]
+                offset = min(
+                    candidate_offsets,
+                    key=lambda value: sum(
+                        relation.source == targets[(index + value) % len(targets)]
+                        for index, relation in enumerate(relations)
+                    ),
+                )
+                targets = targets[offset:] + targets[:offset]
+
+            for relation, target in zip(relations, targets):
+                shuffled.append(
+                    OntologyRelation(
+                        source=relation.source,
+                        target=target,
+                        type=relation.type,
+                        weight=relation.weight,
+                        metadata={**relation.metadata, "placebo": "shuffled_target"},
+                    )
+                )
+        return Ontology(list(self.nodes.values()), shuffled)
 
     def context(self, concept: str | None, max_depth: int = 2) -> OntologyContext:
         target = self.resolve(concept)

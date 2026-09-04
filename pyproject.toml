@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cahnm"
-version = "0.1.0"
-description = "Constraint-aware hard negative mining framework for neural retrieval experiments."
+version = "0.2.0"
+description = "Constraint-aware hard negative mining for dense retrieval with structured domain models."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -21,9 +21,9 @@ dense = [
   "sentence-transformers>=3.0",
   "torch>=2.1",
 ]
-llm = [
-  "openai>=1.0",
-  "httpx>=0.24,<0.28",
+plots = [
+  "matplotlib>=3.8",
+  "numpy>=1.24",
 ]
 dev = [
   "pytest>=8.0",

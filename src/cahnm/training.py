@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import csv
-import inspect
 import json
+import os
+import platform
 import random
+import sys
 import time
 from pathlib import Path
 
@@ -67,9 +69,15 @@ def train_sentence_transformer_triplets(
     loss_name: str = "triplet",
     learning_rate: float | None = None,
     warmup_ratio: float = 0.1,
+    random_seed: int = 13,
+    deterministic: bool = True,
+    cached_mini_batch_size: int = 4,
+    mnrl_scale: float = 20.0,
 ) -> dict:
     try:
         from sentence_transformers import InputExample, SentenceTransformer, losses
+        import sentence_transformers
+        import torch
         from torch.utils.data import DataLoader
     except Exception as exc:
         raise RuntimeError(
@@ -77,6 +85,7 @@ def train_sentence_transformer_triplets(
             "Install the dense extra or run comparison without --train."
         ) from exc
 
+    _set_global_seed(torch, random_seed, deterministic)
     examples = [
         InputExample(texts=[row["query"], row["positive"], row["negative"]])
         for row in triplets
@@ -87,9 +96,24 @@ def train_sentence_transformer_triplets(
     model = SentenceTransformer(model_name, device=device)
     if max_seq_length:
         model.max_seq_length = max_seq_length
-    loader = DataLoader(examples, shuffle=True, batch_size=batch_size)
-    train_objectives = _make_train_objectives(losses, model, loader, loss_name)
-    total_steps = len(loader) * epochs
+    generator = torch.Generator()
+    generator.manual_seed(random_seed)
+    loader = DataLoader(
+        examples,
+        shuffle=True,
+        batch_size=batch_size,
+        generator=generator,
+        collate_fn=model.smart_batching_collate,
+    )
+    train_objectives = _make_train_objectives(
+        losses,
+        model,
+        loader,
+        loss_name,
+        cached_mini_batch_size=cached_mini_batch_size,
+        mnrl_scale=mnrl_scale,
+    )
+    total_steps = len(loader) * epochs * len(train_objectives)
     log_rows: list[dict] = []
     start_time = time.time()
     summary_writer = _make_summary_writer(logs_dir / "tensorboard")
@@ -123,27 +147,40 @@ def train_sentence_transformer_triplets(
         "max_seq_length": max_seq_length,
         "use_amp": use_amp,
         "loss": loss_name,
-        "learning_rate": learning_rate,
+        "learning_rate": learning_rate or 2e-5,
         "warmup_ratio": warmup_ratio,
+        "random_seed": random_seed,
+        "deterministic": deterministic,
+        "cached_mini_batch_size": cached_mini_batch_size,
+        "mnrl_scale": mnrl_scale,
         "steps_per_epoch": len(loader),
         "total_steps": total_steps,
         "started_at": start_time,
+        "trainer": "explicit-pytorch-loop",
+        "environment": {
+            "python": sys.version,
+            "platform": platform.platform(),
+            "torch": torch.__version__,
+            "sentence_transformers": sentence_transformers.__version__,
+            "cuda_available": torch.cuda.is_available(),
+            "cuda_device_count": torch.cuda.device_count(),
+            "cuda_device_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+        },
     }
     (logs_dir / "training_config.json").write_text(json.dumps(train_summary, indent=2, sort_keys=True), encoding="utf-8")
 
-    fit_kwargs = {
-        "train_objectives": train_objectives,
-        "epochs": epochs,
-        "show_progress_bar": True,
-        "callback": callback,
-    }
-    if "use_amp" in inspect.signature(model.fit).parameters:
-        fit_kwargs["use_amp"] = use_amp
-    if learning_rate is not None and "optimizer_params" in inspect.signature(model.fit).parameters:
-        fit_kwargs["optimizer_params"] = {"lr": learning_rate}
-    if "warmup_steps" in inspect.signature(model.fit).parameters:
-        fit_kwargs["warmup_steps"] = max(0, int(total_steps * warmup_ratio))
-    model.fit(**fit_kwargs)
+    _fit_explicit_pytorch(
+        torch,
+        model,
+        train_objectives,
+        epochs=epochs,
+        total_steps=total_steps,
+        learning_rate=learning_rate or 2e-5,
+        warmup_steps=max(0, int(total_steps * warmup_ratio)),
+        use_amp=use_amp,
+        callback=callback,
+        summary_writer=summary_writer,
+    )
     model.save(str(output_dir))
     if summary_writer is not None:
         summary_writer.flush()
@@ -155,17 +192,113 @@ def train_sentence_transformer_triplets(
     return train_summary
 
 
-def _make_train_objectives(losses, model, loader, loss_name: str):
+def _fit_explicit_pytorch(
+    torch,
+    model,
+    train_objectives,
+    epochs: int,
+    total_steps: int,
+    learning_rate: float,
+    warmup_steps: int,
+    use_amp: bool,
+    callback,
+    summary_writer,
+) -> None:
+    """Train without the optional Hugging Face Trainer dependency stack."""
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+
+    def lr_multiplier(step: int) -> float:
+        if warmup_steps > 0 and step < warmup_steps:
+            return (step + 1) / warmup_steps
+        remaining = max(0, total_steps - step)
+        decay_steps = max(1, total_steps - warmup_steps)
+        return remaining / decay_steps
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_multiplier)
+    model_device = next(model.parameters()).device
+    amp_enabled = bool(use_amp and model_device.type == "cuda")
+    scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
+    global_step = 0
+    model.train()
+
+    for epoch in range(epochs):
+        for loader, loss_model in train_objectives:
+            loss_model.train()
+            for sentence_features, labels in loader:
+                sentence_features = [
+                    {
+                        key: value.to(model_device) if hasattr(value, "to") else value
+                        for key, value in features.items()
+                    }
+                    for features in sentence_features
+                ]
+                labels = labels.to(model_device)
+                optimizer.zero_grad(set_to_none=True)
+                with torch.amp.autocast("cuda", enabled=amp_enabled):
+                    loss_value = loss_model(sentence_features, labels)
+                scaler.scale(loss_value).backward()
+                if amp_enabled:
+                    scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                scaler.step(optimizer)
+                scaler.update()
+                scheduler.step()
+                global_step += 1
+                numeric_loss = float(loss_value.detach().cpu())
+                callback(-numeric_loss, epoch + 1, global_step)
+                if summary_writer is not None:
+                    summary_writer.add_scalar("train/loss", numeric_loss, global_step)
+                    summary_writer.add_scalar(
+                        "train/learning_rate", optimizer.param_groups[0]["lr"], global_step
+                    )
+        print(f"completed training epoch {epoch + 1}/{epochs} ({global_step}/{total_steps} steps)", flush=True)
+
+
+def _make_train_objectives(
+    losses,
+    model,
+    loader,
+    loss_name: str,
+    cached_mini_batch_size: int = 4,
+    mnrl_scale: float = 20.0,
+):
     if loss_name == "triplet":
         return [(loader, losses.TripletLoss(model=model))]
-    if loss_name in {"mnrl", "multiple-negatives"}:
-        return [(loader, losses.MultipleNegativesRankingLoss(model=model))]
-    if loss_name == "hybrid":
+    if loss_name == "cached-mnrl":
+        if cached_mini_batch_size <= 0:
+            raise ValueError("cached_mini_batch_size must be positive")
         return [
-            (loader, losses.TripletLoss(model=model)),
-            (loader, losses.MultipleNegativesRankingLoss(model=model)),
+            (
+                loader,
+                losses.CachedMultipleNegativesRankingLoss(
+                    model=model,
+                    scale=mnrl_scale,
+                    mini_batch_size=cached_mini_batch_size,
+                ),
+            )
         ]
     raise ValueError(f"Unknown training loss: {loss_name}")
+
+
+def _set_global_seed(torch, random_seed: int, deterministic: bool) -> None:
+    os.environ.setdefault("PYTHONHASHSEED", str(random_seed))
+    if deterministic:
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    random.seed(random_seed)
+    try:
+        import numpy as np
+
+        np.random.seed(random_seed)
+    except Exception:
+        pass
+    torch.manual_seed(random_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(random_seed)
+    if deterministic:
+        torch.use_deterministic_algorithms(True, warn_only=True)
+        if hasattr(torch.backends, "cudnn"):
+            torch.backends.cudnn.benchmark = False
+            torch.backends.cudnn.deterministic = True
 
 
 def _append_training_log(path: Path, row: dict) -> None:

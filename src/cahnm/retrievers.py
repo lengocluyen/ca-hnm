@@ -183,7 +183,7 @@ class CandidatePool:
                 (doc_id, _fused_candidate_score(values, fusion=fusion, rrf_k=rrf_k), _candidate_source(values))
                 for doc_id, values in merged.items()
             ]
-            ordered.sort(key=lambda item: item[1], reverse=True)
+            ordered.sort(key=lambda item: (-item[1], item[0]))
             pools[query.id] = ordered
         return cls(pools)
 

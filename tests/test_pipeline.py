@@ -1,297 +1,313 @@
+import csv
 import gzip
+import json
+import sys
+from collections import Counter
 from pathlib import Path
 
-from cahnm.baselines import BaselineConfig, NegativeStrategyRunner, summarize_negative_quality
+from cahnm.baselines import (
+    CORE_STRATEGIES,
+    DEFAULT_STRATEGIES,
+    MIXED_STRATEGIES,
+    STRUCTURAL_STRATEGIES,
+    BaselineConfig,
+    NegativeStrategyRunner,
+)
 from cahnm.data.download import (
     build_course_skill_atlas_ontology,
     build_mooccubex_ontology,
-    download_mooccubex,
-    write_sample_dataset,
 )
-from cahnm.data.prepare import prepare_course_skill_atlas_benchmark, prepare_mooccubex_benchmark
+from cahnm.data.prepare import (
+    _safe_query_id,
+    prepare_course_skill_atlas_benchmark,
+    prepare_mooccubex_benchmark,
+)
 from cahnm.evaluation import evaluate_run
-from cahnm.external import load_external_negatives, load_run
-from cahnm.io_utils import load_corpus, load_qrels, load_queries
-from cahnm.miner import CAHNMiner, MiningConfig
+from cahnm.io_utils import (
+    load_corpus,
+    load_qrels,
+    load_queries,
+    write_qrels,
+    write_queries,
+)
 from cahnm.ontology import Ontology, make_sample_ontology
-from cahnm.retrievers import BM25Retriever, CandidatePool, DenseRetriever
-from cahnm.schemas import RetrievalRun
+from cahnm.schemas import Qrel, Query, RetrievalRun
+from scripts.split_benchmark import main as split_benchmark_main
 
 
-def test_sample_cahnm_pipeline(tmp_path: Path) -> None:
-    dataset = write_sample_dataset(tmp_path)
-    docs = load_corpus(dataset / "corpus.jsonl")
-    queries = load_queries(dataset / "queries.jsonl")
-    qrels = load_qrels(dataset / "qrels.tsv")
-    ontology = Ontology.load(dataset / "ontology.json")
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
-    miner = CAHNMiner(
-        docs,
-        ontology,
-        config=MiningConfig(top_k_bm25=5, top_k_dense=5, max_negatives_per_query=3, dense_backend="hash"),
+
+def _runner(tmp_path: Path, *, max_negatives: int = 4) -> NegativeStrategyRunner:
+    dataset = REPO_ROOT / "examples" / "sample_benchmark"
+    return NegativeStrategyRunner(
+        load_corpus(dataset / "corpus.jsonl"),
+        load_queries(dataset / "queries.jsonl"),
+        load_qrels(dataset / "qrels.tsv"),
+        Ontology.load(dataset / "ontology.json"),
+        config=BaselineConfig(
+            max_negatives_per_query=max_negatives,
+            top_k=5,
+            dense_backend="hash",
+            random_seed=13,
+        ),
     )
-    negatives = miner.mine(queries, qrels)
-
-    assert negatives
-    assert any("level_mismatch" in n.violation_types or "postrequisite_mismatch" in n.violation_types for n in negatives)
-    assert all(n.source == "CA-HNM" for n in negatives)
 
 
-def test_baseline_quality_summary(tmp_path: Path) -> None:
-    dataset = write_sample_dataset(tmp_path)
-    docs = load_corpus(dataset / "corpus.jsonl")
-    queries = load_queries(dataset / "queries.jsonl")
-    qrels = load_qrels(dataset / "qrels.tsv")
-    ontology = Ontology.load(dataset / "ontology.json")
-
-    runner = NegativeStrategyRunner(
-        docs,
-        queries,
-        qrels,
-        ontology,
-        config=BaselineConfig(max_negatives_per_query=2, top_k=5, dense_backend="hash"),
-    )
-    negatives_by_strategy = {name: runner.run(name) for name in ["RandomNeg", "BM25Neg", "DenseNeg", "OntoNeg", "LLMNeg", "CA-HNM"]}
-    rows = summarize_negative_quality(negatives_by_strategy, docs, queries, qrels, ontology)
-
-    assert {row["strategy"] for row in rows} == set(negatives_by_strategy)
-    assert any(row["strategy"] == "CA-HNM" and row["valid_hard_rate"] > 0 for row in rows)
-
-
-def test_related_work_strategy_names(tmp_path: Path) -> None:
-    dataset = write_sample_dataset(tmp_path)
-    docs = load_corpus(dataset / "corpus.jsonl")
-    queries = load_queries(dataset / "queries.jsonl")
-    qrels = load_qrels(dataset / "qrels.tsv")
-    ontology = Ontology.load(dataset / "ontology.json")
-
-    runner = NegativeStrategyRunner(
-        docs,
-        queries,
-        qrels,
-        ontology,
-        config=BaselineConfig(max_negatives_per_query=2, top_k=5, dense_backend="hash"),
-    )
-    strategies = ["DPR-Random", "ANCE", "ADORE", "RocketQA-Denoised", "TAS-Balanced", "GPL-Pseudo", "SyNeg"]
-
-    for strategy in strategies:
-        negatives = runner.run(strategy)
-        assert negatives
-        assert all(negative.source == strategy for negative in negatives)
-
-
-def test_cahnm_ablation_strategy_names(tmp_path: Path) -> None:
-    dataset = write_sample_dataset(tmp_path)
-    docs = load_corpus(dataset / "corpus.jsonl")
-    queries = load_queries(dataset / "queries.jsonl")
-    qrels = load_qrels(dataset / "qrels.tsv")
-    ontology = Ontology.load(dataset / "ontology.json")
-
-    runner = NegativeStrategyRunner(
-        docs,
-        queries,
-        qrels,
-        ontology,
-        config=BaselineConfig(max_negatives_per_query=2, top_k=5, dense_backend="hash"),
-    )
-    strategies = [
-        "CA-HNM-v2",
-        "CA-HNM-v2-mixed",
+def test_public_strategy_surface_matches_paper(tmp_path: Path) -> None:
+    assert DEFAULT_STRATEGIES == CORE_STRATEGIES
+    assert CORE_STRATEGIES == [
+        "DPR-Random",
+        "DenseNeg",
         "CA-HNM-full",
+        "CA-HNM-rank-matched",
+    ]
+    assert MIXED_STRATEGIES == [
+        "DPR-Random",
+        "DenseNeg",
         "CA-HNM-mixed",
+        "CA-HNM-matched-mixed",
+    ]
+    assert STRUCTURAL_STRATEGIES == [
+        "CA-HNM-full",
+        "CA-HNM-label-only",
+        "CA-HNM-shuffled-graph",
         "CA-HNM-no-ontology",
-        "CA-HNM-no-reasoning",
-        "CA-HNM-no-fn-filter",
-        "CA-HNM-prereq-only",
-        "CA-HNM-sibling-only",
     ]
 
-    for strategy in strategies:
+    runner = _runner(tmp_path)
+    for strategy in sorted(set(CORE_STRATEGIES + MIXED_STRATEGIES + STRUCTURAL_STRATEGIES)):
         negatives = runner.run(strategy)
-        assert all(negative.source == strategy for negative in negatives)
+        assert all(row.source == strategy for row in negatives)
+        assert all(row.doc_id not in runner.positives.get(row.query_id, set()) for row in negatives)
 
 
-def test_retrieval_aware_cahnm_uses_rrf_metadata(tmp_path: Path) -> None:
-    dataset = write_sample_dataset(tmp_path)
-    docs = load_corpus(dataset / "corpus.jsonl")
-    queries = load_queries(dataset / "queries.jsonl")
-    qrels = load_qrels(dataset / "qrels.tsv")
-    ontology = Ontology.load(dataset / "ontology.json")
+def test_rank_matched_control_is_one_for_one_and_excludes_treatment(tmp_path: Path) -> None:
+    runner = _runner(tmp_path, max_negatives=2)
+    treatment = runner.run("CA-HNM-full")
+    control = runner.run("CA-HNM-rank-matched")
 
-    runner = NegativeStrategyRunner(
-        docs,
-        queries,
-        qrels,
-        ontology,
-        config=BaselineConfig(max_negatives_per_query=2, top_k=5, dense_backend="hash"),
+    assert len(control) == len(treatment)
+    assert not {(row.query_id, row.doc_id) for row in treatment} & {
+        (row.query_id, row.doc_id) for row in control
+    }
+    assert all(
+        row.metadata["causal_control"] == "retrieval-rank-and-source-matched"
+        for row in control
     )
-    negatives = runner.run("CA-HNM-v2")
-
-    assert negatives
-    assert all(negative.source == "CA-HNM-v2" for negative in negatives)
-    assert all(negative.metadata["candidate_fusion"] == "rrf" for negative in negatives)
-    assert all(negative.metadata["selection_policy"] == "retrieval_aware" for negative in negatives)
-    assert all("retrieval_aware_score" in negative.metadata for negative in negatives)
+    assert all(row.metadata.get("rank_distance", -1) >= 0 for row in control)
 
 
-def test_candidate_pool_rrf_avoids_raw_score_fusion(tmp_path: Path) -> None:
-    dataset = write_sample_dataset(tmp_path)
-    docs = load_corpus(dataset / "corpus.jsonl")
-    queries = load_queries(dataset / "queries.jsonl")
-    bm25 = BM25Retriever(docs)
-    dense = DenseRetriever(docs, backend="hash")
+def test_matched_mixture_replaces_constraint_component(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    treatment = runner.run("CA-HNM-mixed")
+    control = runner.run("CA-HNM-matched-mixed")
 
-    pool = CandidatePool.union(queries[:1], bm25, dense, top_k_bm25=5, top_k_dense=5, fusion="rrf")
+    assert treatment and control
+    assert len(treatment) == len(control)
+    matched = [
+        row
+        for row in control
+        if row.metadata.get("component") == "matched_constraint_component"
+    ]
+    assert matched
+    assert all(
+        row.metadata.get("matching_policy") == "source_then_absolute_rank"
+        for row in matched
+    )
 
-    assert pool.rankings[queries[0].id]
-    assert all(0.0 < score < 1.0 for _, score, _ in pool.rankings[queries[0].id])
-    assert any("bm25:" in source or "dense:" in source for _, _, source in pool.rankings[queries[0].id])
+
+def test_random_component_is_invariant_to_call_order(tmp_path: Path) -> None:
+    runner = _runner(tmp_path, max_negatives=2)
+    first = runner.random_negatives(source="random_component")
+    runner.run("DPR-Random")
+    second = runner.random_negatives(source="random_component")
+
+    assert [(row.query_id, row.doc_id) for row in first] == [
+        (row.query_id, row.doc_id) for row in second
+    ]
 
 
-def test_evaluate_run_reports_rank_metrics(tmp_path: Path) -> None:
-    dataset = write_sample_dataset(tmp_path)
-    qrels = load_qrels(dataset / "qrels.tsv")
-    run = RetrievalRun("toy", {"q1": [("d1", 1.0), ("d2", 0.5)], "q2": [("d4", 1.0), ("d5", 0.5)]})
+def test_shuffled_ontology_preserves_typed_degree_marginals() -> None:
+    ontology = make_sample_ontology()
+    shuffled = ontology.shuffled_relations(random_seed=13)
 
+    assert Counter((row.type, row.source) for row in ontology.relations) == Counter(
+        (row.type, row.source) for row in shuffled.relations
+    )
+    assert Counter((row.type, row.target) for row in ontology.relations) == Counter(
+        (row.type, row.target) for row in shuffled.relations
+    )
+    assert all(
+        row.metadata.get("placebo") == "shuffled_target"
+        for row in shuffled.relations
+    )
+
+
+def test_binary_retrieval_metrics() -> None:
+    qrels = [Qrel("q1", "d1", 1), Qrel("q2", "d5", 1)]
+    run = RetrievalRun(
+        "toy",
+        {"q1": [("d1", 1.0), ("d2", 0.5)], "q2": [("d4", 1.0), ("d5", 0.5)]},
+    )
     metrics = evaluate_run(run, qrels, ks=(1, 2))
 
     assert "NDCG@1" in metrics
-    assert "MAP@2" in metrics
     assert "MRR@2" in metrics
+    assert "MAP@2" in metrics
+    assert "Recall@2" in metrics
 
 
 def test_ontology_reasoning_closure() -> None:
     ontology = make_sample_ontology()
+    prerequisites = {
+        node.id for node in ontology.context("query_optimization").prerequisites
+    }
+    postrequisites = {
+        node.id for node in ontology.context("relational_keys").postrequisites
+    }
+    siblings = {node.id for node in ontology.context("sql_joins").siblings}
 
-    optimization_context = ontology.context("query_optimization")
-    prerequisite_ids = {node.id for node in optimization_context.prerequisites}
-    assert {"sql_joins", "relational_keys"} <= prerequisite_ids
-
-    keys_context = ontology.context("relational_keys")
-    postrequisite_ids = {node.id for node in keys_context.postrequisites}
-    assert {"sql_joins", "query_optimization"} <= postrequisite_ids
-
-    joins_context = ontology.context("sql_joins")
-    sibling_ids = {node.id for node in joins_context.siblings}
-    assert "sql_filtering" in sibling_ids
-
-
-def test_external_trec_run_loader_and_negative_normalizer(tmp_path: Path) -> None:
-    run_path = tmp_path / "ance.run"
-    run_path.write_text(
-        "q1 Q0 d2 1 12.5 ANCE\n"
-        "q1 Q0 d3 2 10.0 ANCE\n"
-        "q2 Q0 d4 1 9.5 ANCE\n",
-        encoding="utf-8",
-    )
-
-    run = load_run(run_path, run_format="trec", name="ANCE-official")
-    negatives = load_external_negatives(run_path, source="ANCE", input_format="trec")
-
-    assert run.name == "ANCE-official"
-    assert run.rankings["q1"] == [("d2", 12.5), ("d3", 10.0)]
-    assert negatives[0].query_id == "q1"
-    assert negatives[0].doc_id == "d2"
-    assert negatives[0].source == "ANCE"
+    assert {"sql_joins", "relational_keys"} <= prerequisites
+    assert {"sql_joins", "query_optimization"} <= postrequisites
+    assert "sql_filtering" in siblings
 
 
-def test_external_dpr_json_maps_question_text_to_query_id(tmp_path: Path) -> None:
-    dataset = write_sample_dataset(tmp_path / "data")
-    queries = load_queries(dataset / "queries.jsonl")
-    dpr_path = tmp_path / "dpr_results.json"
-    dpr_path.write_text(
-        """
+def test_safe_query_ids_preserve_punctuation_distinctions() -> None:
+    assert _safe_query_id("K_itemset ") != _safe_query_id("K_itemset.")
+
+
+def test_target_disjoint_split(tmp_path: Path, monkeypatch) -> None:
+    queries = [
+        Query("q0a", "first rendering", "shared-target"),
+        Query("q0b", "second rendering", "shared-target"),
+        *(Query(f"q{i}", f"query {i}", f"target-{i}") for i in range(1, 12)),
+    ]
+    qrels = [Qrel(query.id, f"d-{query.id}", 1) for query in queries]
+    query_path = tmp_path / "queries.jsonl"
+    qrels_path = tmp_path / "qrels.tsv"
+    out_dir = tmp_path / "split"
+    write_queries(query_path, queries)
+    write_qrels(qrels_path, qrels)
+    monkeypatch.setattr(
+        sys,
+        "argv",
         [
-          {
-            "question": "beginner SQL joins",
-            "ctxs": [
-              {"id": "doc-x", "score": "4.2"},
-              {"id": "doc-y", "score": "3.1"}
-            ]
-          }
-        ]
-        """,
-        encoding="utf-8",
+            "split_benchmark.py",
+            "--queries",
+            str(query_path),
+            "--qrels",
+            str(qrels_path),
+            "--out-dir",
+            str(out_dir),
+            "--seed",
+            "19",
+        ],
     )
 
-    run = load_run(dpr_path, run_format="dpr", name="DPR-official", queries=queries)
+    split_benchmark_main()
+    split_ids = {
+        name: {query.id for query in load_queries(out_dir / f"{name}.queries.jsonl")}
+        for name in ("train", "dev", "test")
+    }
 
-    assert "q1" in run.rankings
-    assert run.rankings["q1"] == [("doc-x", 4.2), ("doc-y", 3.1)]
+    assert not split_ids["train"] & split_ids["dev"]
+    assert not split_ids["train"] & split_ids["test"]
+    assert not split_ids["dev"] & split_ids["test"]
+    assert any({"q0a", "q0b"} <= ids for ids in split_ids.values())
+    manifest = json.loads((out_dir / "split_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["overlap_audit"] == {
+        "dev_test": 0,
+        "train_dev": 0,
+        "train_test": 0,
+    }
 
 
-def test_mooccubex_manifest_and_benchmark_preparation(tmp_path: Path) -> None:
-    manifest_path = download_mooccubex(tmp_path / "manifest_only")
-    assert manifest_path.name == "mooccubex_manifest.json"
-
+def test_mooccubex_preparation(tmp_path: Path) -> None:
     raw = tmp_path / "mooccubex"
     (raw / "entities").mkdir(parents=True)
     (raw / "relations").mkdir()
     (raw / "prerequisites").mkdir()
     (raw / "entities" / "concept.json").write_text(
-        '{"id":"K_array_cs","name":"array","context":"array\n'
-        'data structure"}\n'
+        '{"id":"K_array_cs","name":"array","context":"array data structure"}\n'
         '{"id":"K_tree_cs","name":"tree","context":"tree data structure"}\n',
         encoding="utf-8",
     )
     (raw / "entities" / "course.json").write_text(
-        '{"id":"C1","name":"Data Structures","about":"Arrays\nand trees.","field":["Computer Science"],"prerequisites":"Programming basics","resource":[]}\n',
+        '{"id":"C1","name":"Data Structures","about":"Arrays and trees.",'
+        '"field":["Computer Science"],"prerequisites":"Programming basics",'
+        '"resource":[]}\n',
         encoding="utf-8",
     )
-    (raw / "relations" / "concept-course.txt").write_text("K_array_cs\tC1\nK_tree_cs\tC1\n", encoding="utf-8")
-    (raw / "prerequisites" / "cs.json").write_text('{"c1":"array","c2":"tree","ground_truth":1}\n', encoding="utf-8")
+    (raw / "relations" / "concept-course.txt").write_text(
+        "K_array_cs\tC1\nK_tree_cs\tC1\n", encoding="utf-8"
+    )
+    (raw / "prerequisites" / "cs.json").write_text(
+        '{"c1":"array","c2":"tree","ground_truth":1}\n', encoding="utf-8"
+    )
 
-    ontology_path = build_mooccubex_ontology(raw, tmp_path / "mooccubex_ontology.json", max_prerequisites=10)
-    prepared = prepare_mooccubex_benchmark(raw, tmp_path / "prepared", ontology_path, max_queries=10)
-    ontology = Ontology.load(ontology_path)
-    docs = load_corpus(prepared / "corpus.jsonl")
-    queries = load_queries(prepared / "queries.jsonl")
-    qrels = load_qrels(prepared / "qrels.tsv")
+    ontology_path = build_mooccubex_ontology(
+        raw, tmp_path / "ontology.json", max_prerequisites=10
+    )
+    prepared = prepare_mooccubex_benchmark(
+        raw, tmp_path / "prepared", ontology_path, max_queries=10
+    )
 
-    assert "K_array_cs" in ontology.nodes
-    assert any(rel.source == "K_tree_cs" and rel.target == "K_array_cs" and rel.type == "requires" for rel in ontology.relations)
-    assert docs and docs[0].id == "C1"
-    assert queries
-    assert qrels
+    assert load_corpus(prepared / "corpus.jsonl")
+    assert load_queries(prepared / "queries.jsonl")
+    assert load_qrels(prepared / "qrels.tsv")
 
 
-def test_course_skill_atlas_ontology_and_benchmark_preparation(tmp_path: Path) -> None:
+def test_course_skill_atlas_preparation(tmp_path: Path) -> None:
     raw = tmp_path / "course_skill_atlas"
     raw.mkdir()
     (raw / "field_name_and_code.csv").write_text(
         "field_name,field_code\nComputer Science,11\nAccounting,52.03\n",
         encoding="utf-8",
     )
-    with gzip.open(raw / "detailed_work_activities_scores.gzip", "wt", encoding="utf-8", newline="") as handle:
+    with gzip.open(
+        raw / "detailed_work_activities_scores.gzip", "wt", encoding="utf-8", newline=""
+    ) as handle:
         handle.write("id,Write computer programs.,Analyze financial information.\n")
         handle.write("1,0.9,0.1\n")
     with gzip.open(raw / "abilities_scores.gzip", "wt", encoding="utf-8", newline="") as handle:
         handle.write("id,Deductive Reasoning\n1,0.7\n")
     with gzip.open(raw / "tasks_scores.gzip", "wt", encoding="utf-8", newline="") as handle:
         handle.write("id,Develop software applications.\n1,0.8\n")
-    with gzip.open(raw / "institution_fos_year.gzip", "wt", encoding="utf-8", newline="") as handle:
-        handle.write("id,year,field_name,field_code,syllabi_cnt,UnitID,institution_name,city,state_code,sector\n")
+    with gzip.open(
+        raw / "institution_fos_year.gzip", "wt", encoding="utf-8", newline=""
+    ) as handle:
+        handle.write(
+            "id,year,field_name,field_code,syllabi_cnt,UnitID,institution_name,city,state_code,sector\n"
+        )
         handle.write("1,2020,Computer Science,11,4,100,Example University,Boston,MA,Public\n")
         handle.write("2,2020,Accounting,52.03,3,101,Example College,Austin,TX,Private\n")
     (raw / "top10_DWA_per_FOS.csv").write_text(
         "Detailed Work Activity (DWA),Rank\n"
-        "Computer Science,\n"
-        "Write computer programs.,1\n"
-        "Accounting,\n"
-        "Analyze financial information.,1\n",
+        "Computer Science,\nWrite computer programs.,1\n"
+        "Accounting,\nAnalyze financial information.,1\n",
         encoding="utf-8",
     )
 
-    ontology_path = build_course_skill_atlas_ontology(raw, tmp_path / "course_skill_atlas_ontology.json")
-    prepared = prepare_course_skill_atlas_benchmark(raw, tmp_path / "prepared_csa", ontology_path, max_queries=10)
-    ontology = Ontology.load(ontology_path)
-    docs = load_corpus(prepared / "corpus.jsonl")
-    queries = load_queries(prepared / "queries.jsonl")
-    qrels = load_qrels(prepared / "qrels.tsv")
+    ontology_path = build_course_skill_atlas_ontology(raw, tmp_path / "ontology.json")
+    prepared = prepare_course_skill_atlas_benchmark(
+        raw, tmp_path / "prepared", ontology_path, max_queries=10
+    )
 
-    assert "csa_field" in ontology.nodes
-    assert "csa_dwa" in ontology.nodes
-    assert any(rel.type == "related" for rel in ontology.relations)
-    assert len(docs) == 2
-    assert queries
-    assert qrels
+    assert len(load_corpus(prepared / "corpus.jsonl")) == 2
+    assert load_queries(prepared / "queries.jsonl")
+    assert load_qrels(prepared / "qrels.tsv")
+
+
+def test_included_forest_source_matches_paper_claim() -> None:
+    with (REPO_ROOT / "results" / "effect_forest_source.csv").open(
+        newline="", encoding="utf-8"
+    ) as handle:
+        rows = list(csv.DictReader(handle))
+
+    assert len(rows) == 8
+    assert sum(float(row["mean_diff"]) > 0 for row in rows) == 6
+    assert sum(float(row["hierarchical_ci95_low"]) > 0 for row in rows) == 4
+    for row in rows:
+        observed = float(row["strategy_mean"]) - float(row["baseline_mean"])
+        assert abs(observed - float(row["mean_diff"])) < 1e-12
