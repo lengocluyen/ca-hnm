@@ -1,6 +1,0 @@
-{"_id": "d1", "metadata": {"level": "beginner"}, "text": "Beginner SQL joins using primary keys and foreign keys.", "title": "Introduction to INNER JOIN and LEFT JOIN"}
-{"_id": "d2", "metadata": {"level": "advanced"}, "text": "Advanced execution plans, indexing, cost optimization, and query performance.", "title": "Advanced SQL Query Optimization"}
-{"_id": "d3", "metadata": {"level": "intermediate"}, "text": "Intermediate aggregation, grouping rows, and aggregate functions.", "title": "SQL Aggregation with GROUP BY"}
-{"_id": "d4", "metadata": {"level": "beginner"}, "text": "Install a database server and configure accounts.", "title": "Database Installation Guide"}
-{"_id": "d5", "metadata": {"level": "beginner"}, "text": "Learn for loops and while loops with simple examples.", "title": "Python Loops for Beginners"}
-{"_id": "d6", "metadata": {"level": "beginner"}, "text": "Define reusable functions with parameters and return values.", "title": "Python Functions"}
