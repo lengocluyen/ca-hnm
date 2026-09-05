@@ -1,0 +1,14 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the accompanying CA-HNM paper."
+title: "CA-HNM: Constraint-Aware Hard Negative Mining for Dense Retrieval with Structured Domain Models"
+type: software
+authors:
+  - family-names: "Le"
+    given-names: "Ngoc Luyen"
+  - family-names: "Abel"
+    given-names: "Marie-Hélène"
+  - family-names: "Laforge"
+    given-names: "Bertrand"
+version: 0.2.0
+date-released: 2026-09-04
+license: NOASSERTION
